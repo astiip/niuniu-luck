@@ -580,6 +580,16 @@ function firstNonSpaceIdx(line) {
   return i;
 }
 
+// True when a line holds only spaces and tabs (a blank line after the
+// input's CR normalisation, which leaves no other whitespace in a line).
+function isBlankLine(line) {
+  for (let i = 0; i < line.length; i++) {
+    const c = line.charCodeAt(i);
+    if (c !== 32 && c !== 9) return false;
+  }
+  return true;
+}
+
 // Fast plain-text run: a run of characters that cannot start any inline
 // token. Used before the expensive RE_TEXT fallback; falls back to RE_TEXT
 // whenever the run could hide a GFM autolink/e-mail start or an image start.
@@ -1587,15 +1597,15 @@ function tokenList(src, ctx) {
           }
         }
 
-        const isBlank = !nextLine.trim();
-        if (nextLineWithoutTabs.search(RE_NON_SPACE) >= indent || isBlank) { // Dedent if possible
+        const isBlank = isBlankLine(nextLine);
+        if (firstNonSpaceIdx(nextLineWithoutTabs) >= indent || isBlank) { // Dedent if possible
           itemContents += '\n' + nextLineWithoutTabs.slice(indent);
         } else {
           // not enough indentation
           if (blankLine) break;
 
           // paragraph continuation unless last line was a different block level element
-          if ((line.includes('\t') ? line.replace(RE_TAB_CHAR_GLOBAL, '    ') : line).search(RE_NON_SPACE) >= 4) break; // indented code block
+          if (firstNonSpaceIdx(line.includes('\t') ? line.replace(RE_TAB_CHAR_GLOBAL, '    ') : line) >= 4) break; // indented code block
           if (fencesBeginRe.test(line)) break;
           if (headingBeginRe.test(line)) break;
           if (htmlBeginRe.test(line)) break;
@@ -1739,79 +1749,110 @@ function blockTokens(src, blocks, lastParagraphClipped, ctx) {
       continue;
     }
 
-    // code
-    if ((token = tokenCode(src))) {
-      src = src.substring(token.raw.length);
-      const lastToken = blocks.at(-1);
-      // An indented code block cannot interrupt a paragraph.
-      if (lastToken?.type === 'paragraph' || lastToken?.type === 'text') {
-        lastToken.raw += (lastToken.raw.endsWith('\n') ? '' : '\n') + token.raw;
-        lastToken.text += '\n' + token.text;
-      } else {
-        blocks.push(token);
-      }
-      continue;
-    }
-
-    // fences
-    if ((token = tokenFences(src))) {
-      src = src.substring(token.raw.length);
-      blocks.push(token);
-      continue;
-    }
-
-    // heading
-    if ((token = tokenHeading(src))) {
-      src = src.substring(token.raw.length);
-      blocks.push(token);
-      continue;
-    }
-
-    // hr
-    if ((token = tokenHr(src))) {
-      src = src.substring(token.raw.length);
-      blocks.push(token);
-      continue;
-    }
-
-    // blockquote
-    if ((token = tokenBlockquote(src, ctx))) {
-      src = src.substring(token.raw.length);
-      blocks.push(token);
-      continue;
-    }
-
-    // list
-    if ((token = tokenList(src, ctx))) {
-      src = src.substring(token.raw.length);
-      blocks.push(token);
-      continue;
-    }
-
-    // html
-    if ((token = tokenHtml(src))) {
-      src = src.substring(token.raw.length);
-      blocks.push(token);
-      continue;
-    }
-
-    // def
-    if ((token = tokenDef(src))) {
-      src = src.substring(token.raw.length);
-      const lastToken = blocks.at(-1);
-      if (lastToken?.type === 'paragraph' || lastToken?.type === 'text') {
-        lastToken.raw += (lastToken.raw.endsWith('\n') ? '' : '\n') + token.raw;
-        lastToken.text += '\n' + token.raw;
-      } else {
-        // The first definition of a label wins, but a later one still consumes its text
-        if (!Object.hasOwn(ctx.links, token.tag)) {
-          ctx.links[token.tag] = { href: token.href, title: token.title };
+    // First-character dispatch for the structural block tokenizers. Each
+    // can only match when the first non-space character (within 0-3 spaces,
+    // or a tab / 4+ spaces for indented code) is its marker. Tokenizers
+    // that cannot match are skipped; the relative order of the ones that
+    // can is the same as marked's.
+    const lead = firstNonSpaceIdx(src);
+    const bch = lead < src.length ? src[lead] : '';
+    if (bch === '\t' || lead >= 4) {
+      // Indented code (4+ spaces, or 0-3 spaces + tab).
+      if ((token = tokenCode(src))) {
+        src = src.substring(token.raw.length);
+        const lastToken = blocks.at(-1);
+        // An indented code block cannot interrupt a paragraph.
+        if (lastToken?.type === 'paragraph' || lastToken?.type === 'text') {
+          lastToken.raw += (lastToken.raw.endsWith('\n') ? '' : '\n') + token.raw;
+          lastToken.text += '\n' + token.text;
+        } else {
+          blocks.push(token);
         }
-        blocks.push(token);
+        continue;
       }
-      continue;
+    } else if (lead <= 3) {
+      if (bch === '`' || bch === '~') {
+        // fences
+        if ((token = tokenFences(src))) {
+          src = src.substring(token.raw.length);
+          blocks.push(token);
+          continue;
+        }
+      } else if (bch === '#') {
+        // heading
+        if ((token = tokenHeading(src))) {
+          src = src.substring(token.raw.length);
+          blocks.push(token);
+          continue;
+        }
+      } else if (bch === '-' || bch === '*') {
+        // hr, then list
+        if ((token = tokenHr(src))) {
+          src = src.substring(token.raw.length);
+          blocks.push(token);
+          continue;
+        }
+        if ((token = tokenList(src, ctx))) {
+          src = src.substring(token.raw.length);
+          blocks.push(token);
+          continue;
+        }
+      } else if (bch === '_') {
+        // hr
+        if ((token = tokenHr(src))) {
+          src = src.substring(token.raw.length);
+          blocks.push(token);
+          continue;
+        }
+      } else if (bch === '+') {
+        // list
+        if ((token = tokenList(src, ctx))) {
+          src = src.substring(token.raw.length);
+          blocks.push(token);
+          continue;
+        }
+      } else if (bch >= '0' && bch <= '9') {
+        // list (ordered)
+        if ((token = tokenList(src, ctx))) {
+          src = src.substring(token.raw.length);
+          blocks.push(token);
+          continue;
+        }
+      } else if (bch === '>') {
+        // blockquote
+        if ((token = tokenBlockquote(src, ctx))) {
+          src = src.substring(token.raw.length);
+          blocks.push(token);
+          continue;
+        }
+      } else if (bch === '<') {
+        // html
+        if ((token = tokenHtml(src))) {
+          src = src.substring(token.raw.length);
+          blocks.push(token);
+          continue;
+        }
+      } else if (bch === '[') {
+        // def
+        if ((token = tokenDef(src))) {
+          src = src.substring(token.raw.length);
+          const lastToken = blocks.at(-1);
+          if (lastToken?.type === 'paragraph' || lastToken?.type === 'text') {
+            lastToken.raw += (lastToken.raw.endsWith('\n') ? '' : '\n') + token.raw;
+            lastToken.text += '\n' + token.raw;
+          } else {
+            // The first definition of a label wins, but a later one still consumes its text
+            if (!Object.hasOwn(ctx.links, token.tag)) {
+              ctx.links[token.tag] = { href: token.href, title: token.title };
+            }
+            blocks.push(token);
+          }
+          continue;
+        }
+      }
     }
-
+    // (any other first character falls through to table / lheading /
+    //  paragraph / text below)
     // table (gfm)
     if ((token = tokenTable(src))) {
       src = src.substring(token.raw.length);
@@ -2003,4 +2044,5 @@ export function parse(md) {
     throw e;
   }
 }
+
 
