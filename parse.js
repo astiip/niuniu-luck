@@ -2035,7 +2035,7 @@ export function __renderFast(md) {
  * guarantee falls back to the reference instead of guessing.
  */
 export function parse(md) {
-  const src = md.replace(/\r\n|\r/g, '\n');
+  const src = md.includes('\r') ? md.replace(/\r\n|\r/g, '\n') : md;
   if (src.length < 2000) return marked.parse(src);
   try {
     return renderFast(src);
